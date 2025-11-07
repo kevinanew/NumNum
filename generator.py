@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 """交互式题目生成脚本。
 
 根据 additional_difficulty 提供的难度模型，生成 100 以内的加减法题目，
@@ -6,9 +8,12 @@
 
 from __future__ import annotations
 
+import html
 import random
 from dataclasses import dataclass
-from typing import Callable, Iterable, Sequence
+from datetime import date
+from pathlib import Path
+from typing import Sequence
 
 from additional_difficulty.differences import difficulty_of_difference
 from additional_difficulty.sum_of_two import difficulty_of_sum_of_two
@@ -34,6 +39,13 @@ class Problem:
             else:
                 total -= number
         return total
+
+
+@dataclass
+class WorksheetMeta:
+    title: str
+    subtitle: str
+    note: str
 
 
 class ProblemFactory:
@@ -93,10 +105,17 @@ def difficulty(problem: Problem) -> float:
     return float(total)
 
 
+def format_level(value: float) -> str:
+    if value == float('inf'):
+        return '∞'
+    return f"{value:.2f}".rstrip('0').rstrip('.')
+
+
 def generate(factory: ProblemFactory, amount: int, min_level: float, max_level: float) -> list[tuple[Problem, float]]:
     collected: list[tuple[Problem, float]] = []
     attempts = 0
-    limit = amount * 200  # 防止死循环
+    candidate_target = max(amount * 2, amount)
+    limit = candidate_target * 200  # 先扩充候选集，减少后续筛选失败
 
     balance_single_step = factory.terms == 2
     plus_target = minus_target = plus_count = minus_count = 0
@@ -113,26 +132,34 @@ def generate(factory: ProblemFactory, amount: int, min_level: float, max_level: 
     max_per_answer = max(1, (amount + 9) // 10)  # 单个答案最多占 10%
     answer_counts: dict[int, int] = {}
 
-    while len(collected) < amount and attempts < limit:
+    candidates: list[tuple[Problem, float]] = []
+    while len(candidates) < candidate_target and attempts < limit:
         attempts += 1
         problem = factory.create()
         if problem is None or not problem.operators:
             continue
 
-        operator = problem.operators[0]
-        answer = problem.answer()
-        if answer_counts.get(answer, 0) >= max_per_answer:
-            continue
-
         level = difficulty(problem)
-
-        if balance_single_step:
-            if operator == '+' and plus_count >= plus_target:
-                continue
-            if operator == '-' and minus_count >= minus_target:
-                continue
-
         if min_level <= level <= max_level:
+            candidates.append((problem, level))
+
+    if candidates:
+        random.shuffle(candidates)
+        for problem, level in candidates:
+            if len(collected) >= amount:
+                break
+
+            operator = problem.operators[0]
+            answer = problem.answer()
+            if answer_counts.get(answer, 0) >= max_per_answer:
+                continue
+
+            if balance_single_step:
+                if operator == '+' and plus_count >= plus_target:
+                    continue
+                if operator == '-' and minus_count >= minus_target:
+                    continue
+
             collected.append((problem, level))
             answer_counts[answer] = answer_counts.get(answer, 0) + 1
             if balance_single_step:
@@ -141,7 +168,129 @@ def generate(factory: ProblemFactory, amount: int, min_level: float, max_level: 
                 else:
                     minus_count += 1
 
+    while len(collected) < amount and attempts < limit:
+        attempts += 1
+        problem = factory.create()
+        if problem is None or not problem.operators:
+            continue
+
+        level = difficulty(problem)
+        if not (min_level <= level <= max_level):
+            continue
+
+        operator = problem.operators[0]
+        answer = problem.answer()
+        if answer_counts.get(answer, 0) >= max_per_answer:
+            continue
+
+        if balance_single_step:
+            if operator == '+' and plus_count >= plus_target:
+                continue
+            if operator == '-' and minus_count >= minus_target:
+                continue
+
+        collected.append((problem, level))
+        answer_counts[answer] = answer_counts.get(answer, 0) + 1
+        if balance_single_step:
+            if operator == '+':
+                plus_count += 1
+            else:
+                minus_count += 1
+
     return collected
+
+
+
+def render_html(problems: Sequence[Problem], meta: WorksheetMeta) -> str:
+    rows: list[str] = []
+    for idx, problem in enumerate(problems, start=1):
+        statement = problem.statement()
+        expression = html.escape(statement).replace('?', '<span class="answer-slot"></span>')
+        rows.append(
+            f'    <div class="problem"><span class="number">{idx}.</span>'
+            f'<span class="expression">{expression}</span></div>'
+        )
+
+    grid_html = "\n".join(rows)
+
+    return f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>{html.escape(meta.title)}</title>
+  <style>
+    @page {{
+      size: A4 portrait;
+      margin: 8mm;
+    }}
+    * {{
+      box-sizing: border-box;
+    }}
+    body {{
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Helvetica Neue', Arial, sans-serif;
+      line-height: 1.35;
+      color: #111;
+      margin: 0 auto;
+      padding: 10mm 12mm 14mm;
+      max-width: 208mm;
+      background: #fff;
+      font-size: 16px;
+    }}
+    .grid {{
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      column-gap: 8mm;
+      row-gap: 4mm;
+      font-size: 17px;
+    }}
+    .problem {{
+      min-height: 26px;
+      padding-bottom: 0;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }}
+    .problem .number {{
+      display: inline-block;
+      width: 28px;
+    }}
+    .problem .expression {{
+      font-variant-numeric: tabular-nums;
+    }}
+    .answer-slot {{
+      display: inline-block;
+      min-width: 28px;
+      margin-left: 4px;
+      border-bottom: 1px dashed #bbb;
+      height: 18px;
+      vertical-align: middle;
+    }}
+    footer {{
+      margin-top: 16px;
+      font-size: 11px;
+      color: #888;
+    }}
+    @media print {{
+      body {{
+        margin: 0;
+        padding: 0;
+        max-width: none;
+      }}
+      .problem {{
+        break-inside: avoid;
+        page-break-inside: avoid;
+      }}
+    }}
+  </style>
+</head>
+<body>
+  <section class="grid">
+{grid_html}
+  </section>
+</body>
+</html>
+"""
+
 
 
 def prompt_int(message: str, default: int, minimum: int) -> int:
@@ -171,6 +320,35 @@ def prompt_float(message: str, default: float) -> float:
             return float(raw)
         except ValueError:
             print('请输入数字。')
+
+
+def prompt_yes_no(message: str) -> bool:
+    while True:
+        raw = input(f"{message} (y/n)：").strip().lower()
+        if raw in {'y', 'yes', '是'}:
+            return True
+        if raw in {'n', 'no', '否', ''}:
+            return False
+        print('请输入 y 或 n。')
+
+
+
+def prompt_output_path(message: str, fallback: str) -> Path:
+    while True:
+        raw = input(f"{message} [{fallback}]: ").strip()
+        target = fallback if not raw else raw
+        path = Path(target).expanduser()
+        if path.is_dir():
+            print('请输入文件名而不是目录。')
+            continue
+        return path
+
+
+
+def ensure_html_suffix(path: Path) -> Path:
+    if path.suffix.lower() not in {'.html', '.htm'}:
+        return path.with_suffix('.html')
+    return path
 
 
 def select_mode() -> tuple[int, str]:
@@ -206,10 +384,27 @@ def main() -> None:
         return
 
     random.shuffle(problems)
+    problems = problems[:amount]
+
+    if len(problems) < amount:
+        print(f"\n仅生成 {len(problems)} 道题。尝试调低难度或减少题量。")
 
     print('\n生成结果：')
-    for idx, (problem, level) in enumerate(problems[:amount], start=1):
+    for idx, (problem, level) in enumerate(problems, start=1):
         print(f"{idx}. {problem.statement()}  (difficulty={level:.2f})")
+
+    if prompt_yes_no('是否生成可打印网页？'):
+        default_name = f"worksheet_{date.today().isoformat()}.html"
+        output_path = ensure_html_suffix(prompt_output_path('输出文件名', default_name))
+        subtitle = f"题量：{len(problems)}  难度：{format_level(min_level)} - {format_level(max_level)}"
+        meta = WorksheetMeta(
+            title=label,
+            subtitle=subtitle,
+            note='姓名：__________    日期：__________'
+        )
+        html_text = render_html([problem for problem, _ in problems], meta)
+        output_path.write_text(html_text, encoding='utf-8')
+        print(f'\n已生成网页：{output_path.resolve()}\n')
 
 
 if __name__ == '__main__':
