@@ -203,12 +203,11 @@ def generate(factory: ProblemFactory, amount: int, min_level: float, max_level: 
 
 def render_html(problems: Sequence[Problem], meta: WorksheetMeta) -> str:
     rows: list[str] = []
-    for idx, problem in enumerate(problems, start=1):
+    for _, problem in enumerate(problems, start=1):
         statement = problem.statement()
-        expression = html.escape(statement).replace('?', '<span class="answer-slot"></span>')
+        expression = html.escape(statement).replace('?', '<span></span>')
         rows.append(
-            f'    <div class="problem"><span class="number">{idx}.</span>'
-            f'<span class="expression">{expression}</span></div>'
+            f'    <div class="problem"><span class="expression">{expression}</span></div>'
         )
 
     grid_html = "\n".join(rows)
@@ -248,22 +247,9 @@ def render_html(problems: Sequence[Problem], meta: WorksheetMeta) -> str:
       padding-bottom: 0;
       display: flex;
       align-items: center;
-      gap: 6px;
-    }}
-    .problem .number {{
-      display: inline-block;
-      width: 28px;
     }}
     .problem .expression {{
       font-variant-numeric: tabular-nums;
-    }}
-    .answer-slot {{
-      display: inline-block;
-      min-width: 28px;
-      margin-left: 4px;
-      border-bottom: 1px dashed #bbb;
-      height: 18px;
-      vertical-align: middle;
     }}
     footer {{
       margin-top: 16px;
@@ -390,8 +376,8 @@ def main() -> None:
         print(f"\n仅生成 {len(problems)} 道题。尝试调低难度或减少题量。")
 
     print('\n生成结果：')
-    for idx, (problem, level) in enumerate(problems, start=1):
-        print(f"{idx}. {problem.statement()}  (difficulty={level:.2f})")
+    for problem, level in problems:
+        print(f"{problem.statement()}  (difficulty={level:.2f})")
 
     if prompt_yes_no('是否生成可打印网页？'):
         default_name = f"worksheet_{date.today().isoformat()}.html"
