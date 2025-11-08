@@ -22,16 +22,19 @@ from additional_difficulty.sum_of_two import difficulty_of_sum_of_two
 
 SAMPLE_SIZE_FOR_DISTRIBUTION = 100_000
 SAMPLE_PRECISION = 2
+# 题库运算始终控制在 100 以内，便于保证加减法不溢出
 
 
 @dataclass
 class Problem:
     """表示一道由多项整数组成的加减算式。"""
+
     numbers: list[int]
     operators: list[str]
 
     def statement(self) -> str:
         """返回题目的字符串表示，供终端与网页展示。"""
+
         parts = [str(self.numbers[0])]
         for operator, number in zip(self.operators, self.numbers[1:]):
             parts.append(f" {operator} {number}")
@@ -40,6 +43,7 @@ class Problem:
 
     def answer(self) -> int:
         """按照运算符顺序计算题目的答案。"""
+
         total = self.numbers[0]
         for operator, number in zip(self.operators, self.numbers[1:]):
             if operator == '+':
@@ -51,11 +55,13 @@ class Problem:
 
 def problem_signature(problem: Problem) -> tuple[tuple[int, ...], tuple[str, ...]]:
     """用数列+运算符列描述一道题目，便于去重。"""
+
     return tuple(problem.numbers), tuple(problem.operators)
 
 
 def deduplicate_problems(problems: Sequence[Problem]) -> list[Problem]:
     """移除重复题目，仅保留首次出现的组合。"""
+
     seen: set[tuple[tuple[int, ...], tuple[str, ...]]] = set()
     unique: list[Problem] = []
     for problem in problems:
@@ -70,20 +76,143 @@ def deduplicate_problems(problems: Sequence[Problem]) -> list[Problem]:
 @dataclass
 class WorksheetMeta:
     """描述导出题单时的标题、副标题与备注。"""
+
     title: str
     subtitle: str
     note: str
 
 
+@dataclass
+class GenerationRequest:
+    """描述用户期望的题量与难度参数。"""
+
+    amount: int
+    minus_ratio: int
+    min_level: float
+    max_level: float
+
+
+@dataclass
+class OperatorPools:
+    """按照首个运算符区分题目集合，便于平衡加减占比。"""
+
+    minus: list[tuple[Problem, float]]
+    plus: list[tuple[Problem, float]]
+
+
+class ProblemSelector:
+    """封装题目筛选逻辑，便于维护。"""
+
+    def __init__(self, scored_samples: Sequence[tuple[Problem, float]]):
+        self.scored_samples = list(scored_samples)
+
+    def select(self, request: GenerationRequest) -> list[tuple[Problem, float]]:
+        eligible = self._filter_by_difficulty(request)
+        if not eligible:
+            print('\n未能在难度范围内选出题目，请放宽难度或减少题量。')
+            return []
+
+        random.shuffle(eligible)
+        pools = self._build_operator_pools(eligible)
+        minus_target = round(request.amount * request.minus_ratio / 100)
+        plus_target = request.amount - minus_target
+
+        if len(pools.minus) < minus_target:
+            print(f"\n减法题仅剩 {len(pools.minus)} 道，无法满足 {minus_target} 道的期望。")
+            minus_target = len(pools.minus)
+        if len(pools.plus) < plus_target:
+            print(f"加法题仅剩 {len(pools.plus)} 道，无法满足 {plus_target} 道的期望。")
+            plus_target = len(pools.plus)
+
+        selected: list[tuple[Problem, float]] = []
+        random.shuffle(pools.minus)
+        random.shuffle(pools.plus)
+        selected.extend(pools.minus[:minus_target])
+        selected.extend(pools.plus[:plus_target])
+
+        if len(selected) < request.amount:
+            # 二次补位不再关心首运算符，最大化利用剩余题目
+            remaining = [item for item in eligible if item not in selected]
+            random.shuffle(remaining)
+            selected.extend(remaining[: request.amount - len(selected)])
+
+        return selected[: request.amount]
+
+    def _filter_by_difficulty(self, request: GenerationRequest) -> list[tuple[Problem, float]]:
+        return [
+            (problem, level)
+            for problem, level in self.scored_samples
+            if request.min_level <= level <= request.max_level
+        ]
+
+    @staticmethod
+    def _build_operator_pools(problems: Sequence[tuple[Problem, float]]) -> OperatorPools:
+        minus_pool = [item for item in problems if item[0].operators[0] == '-']
+        plus_pool = [item for item in problems if item[0].operators[0] == '+']
+        return OperatorPools(minus=minus_pool, plus=plus_pool)
+
+
+class WorksheetPresenter:
+    """负责控制台展示与导出。"""
+
+    def __init__(self, label: str):
+        self.label = label
+
+    def show_distribution(self, distribution: Sequence[tuple[float, int]], total: int) -> None:
+        print('难度分布：')
+        for level, count in distribution:
+            ratio = count / total * 100 if total else 0
+            print(f"  难度 {level:.{SAMPLE_PRECISION}f}: {count:>7}  ({ratio:5.2f}%)")
+
+    @staticmethod
+    def report_operator_distribution(problems: Sequence[tuple[Problem, float]]) -> None:
+        minus_count = sum(1 for problem, _ in problems if problem.operators[0] == '-')
+        plus_count = len(problems) - minus_count
+        print(f"\n实际加法/减法分布：加法 {plus_count} 道，减法 {minus_count} 道。")
+
+    @staticmethod
+    def print_problem_statements(problems: Sequence[tuple[Problem, float]]) -> None:
+        for problem, level in problems:
+            print(f"{problem.statement()}  (difficulty={level:.2f})")
+
+    def maybe_export_html(
+        self,
+        problems: Sequence[tuple[Problem, float]],
+        request: GenerationRequest,
+    ) -> None:
+        if not problems:
+            return
+        if not prompt_yes_no('是否生成可打印网页？'):
+            return
+
+        default_name = f"worksheet_{date.today().isoformat()}.html"
+        output_path = ensure_html_suffix(prompt_output_path('输出文件名', default_name))
+        subtitle = (
+            f"题量：{len(problems)}  难度：{format_level(request.min_level)} - "
+            f"{format_level(request.max_level)}"
+        )
+        meta = WorksheetMeta(
+            title=self.label,
+            subtitle=subtitle,
+            note='姓名：__________    日期：__________',
+        )
+        html_text = render_html([problem for problem, _ in problems], meta)
+        output_path.write_text(html_text, encoding='utf-8')
+        print(f'\n已生成网页：{output_path.resolve()}\n')
+
+
 class ProblemFactory:
     """根据项数与结果上限随机构造题目。"""
+
     def __init__(self, terms: int, limit: int):
         """配置需要的算式项数与结果上限。"""
+
         self.terms = terms
         self.limit = limit
 
     def create(self) -> Problem | None:
         """随机生成一道符合限制的题目，若失败返回 None。"""
+
         current = random.randint(1, self.limit)
         numbers = [current]
         operators: list[str] = []
@@ -92,6 +221,7 @@ class ProblemFactory:
             operator = random.choice(['+', '-'])
 
             if operator == '+':
+                # 避免加法导致当前值超过上限
                 available = self.limit - current
                 if available <= 0:
                     operator = '-'
@@ -103,6 +233,7 @@ class ProblemFactory:
                     continue
 
             if current == 0:
+                # 当前值为 0 时不允许再减，强制切换为加法走正向路径
                 available = self.limit - current
                 if available <= 0:
                     return None
@@ -122,6 +253,7 @@ class ProblemFactory:
 
 def difficulty(problem: Problem) -> float:
     """根据 additional_difficulty 模型计算题目的浮点难度。"""
+
     total = 0.0
     running = problem.numbers[0]
 
@@ -138,6 +270,7 @@ def difficulty(problem: Problem) -> float:
 
 def format_level(value: float) -> str:
     """把浮点难度格式化为人类可读的字符串。"""
+
     if value == float('inf'):
         return '∞'
     return f"{value:.2f}".rstrip('0').rstrip('.')
@@ -145,6 +278,7 @@ def format_level(value: float) -> str:
 
 def generate(factory: ProblemFactory, amount: int, min_level: float, max_level: float) -> list[tuple[Problem, float]]:
     """使用题目工厂生成满足数量与难度范围的题目集合。"""
+
     collected: list[tuple[Problem, float]] = []
     attempts = 0
     candidate_target = max(amount * 2, amount)
@@ -239,6 +373,7 @@ def snapshot_difficulty_distribution(
     precision: int = SAMPLE_PRECISION,
 ) -> tuple[list[tuple[float, int]], list[tuple[Problem, float]]]:
     """随机采样题目以估算指定题型的难度分布，并返回去重后的题库。"""
+
     factory = ProblemFactory(terms=terms, limit=100)
     samples: list[Problem] = []
     while len(samples) < sample_size:
@@ -262,6 +397,7 @@ def snapshot_difficulty_distribution(
 
 def render_html(problems: Sequence[Problem], meta: WorksheetMeta) -> str:
     """将题目渲染成 A4 打印友好的 HTML。"""
+
     rows: list[str] = []
     for _, problem in enumerate(problems, start=1):
         statement = problem.statement()
@@ -338,9 +474,9 @@ def render_html(problems: Sequence[Problem], meta: WorksheetMeta) -> str:
 """
 
 
-
 def prompt_int(message: str, default: int, minimum: int) -> int:
     """交互式获取整数输入，带默认值与最小值校验。"""
+
     while True:
         raw = input(f"{message} [{default}]: ").strip()
         if not raw:
@@ -360,6 +496,7 @@ def prompt_int(message: str, default: int, minimum: int) -> int:
 
 def prompt_float(message: str, default: float) -> float:
     """交互式获取浮点输入，无法解析时提醒重输。"""
+
     while True:
         raw = input(f"{message} [{default}]: ").strip()
         if not raw:
@@ -372,6 +509,7 @@ def prompt_float(message: str, default: float) -> float:
 
 def prompt_yes_no(message: str) -> bool:
     """询问用户布尔选择，接受中英文 y/n。"""
+
     while True:
         raw = input(f"{message} (y/n)：").strip().lower()
         if raw in {'y', 'yes', '是'}:
@@ -381,9 +519,9 @@ def prompt_yes_no(message: str) -> bool:
         print('请输入 y 或 n。')
 
 
-
 def prompt_output_path(message: str, fallback: str) -> Path:
     """获取输出文件路径，禁止用户输入目录。"""
+
     while True:
         raw = input(f"{message} [{fallback}]: ").strip()
         target = fallback if not raw else raw
@@ -394,9 +532,9 @@ def prompt_output_path(message: str, fallback: str) -> Path:
         return path
 
 
-
 def ensure_html_suffix(path: Path) -> Path:
     """确保返回的路径后缀为 .html/.htm。"""
+
     if path.suffix.lower() not in {'.html', '.htm'}:
         return path.with_suffix('.html')
     return path
@@ -404,6 +542,7 @@ def ensure_html_suffix(path: Path) -> Path:
 
 def prompt_percentage(message: str, default: int) -> int:
     """获取 0-100 之间的整数百分比。"""
+
     while True:
         raw = input(f"{message} [{default}%]: ").strip('% ').strip()
         if not raw:
@@ -420,84 +559,54 @@ def prompt_percentage(message: str, default: int) -> int:
 
 def select_mode() -> tuple[int, str]:
     """当前版本固定提供 100 以内两数加减。"""
+
     print('\n当前仅支持题型：100 以内两数加减。')
     return 2, '100 以内两数加减'
 
 
-def main() -> None:
-    """命令行入口：采集需求、打印分布并生成题目。"""
-    terms, label = select_mode()
-    print(f"\n已选择题型：{label}\n")
-    print(f"正在基于 {SAMPLE_SIZE_FOR_DISTRIBUTION} 道随机题估算该题型的难度分布……")
-    distribution, scored_samples = snapshot_difficulty_distribution(terms)
-    unique_total = len(scored_samples)
-    print(f'去重后保留 {unique_total} 道独特题目。')
-    print('难度分布：')
-    for level, count in distribution:
-        ratio = count / unique_total * 100 if unique_total else 0
-        print(f"  难度 {level:.{SAMPLE_PRECISION}f}: {count:>7}  ({ratio:5.2f}%)")
+def collect_generation_request() -> GenerationRequest:
+    """采集用户输入并转换为结构化的生成请求。"""
 
     amount = prompt_int('\n需要生成多少道题（至少 1 道）', default=100, minimum=1)
-    minus_percentage = prompt_percentage('减法题占比（剩余将自动分配给加法）', default=50)
+    minus_ratio = prompt_percentage('减法题占比（剩余将自动分配给加法）', default=50)
     min_level = prompt_float('最低难度', default=10.0)
-    max_level = float('inf')
+    return GenerationRequest(
+        amount=amount,
+        minus_ratio=minus_ratio,
+        min_level=min_level,
+        max_level=float('inf'),
+    )
 
-    eligible = [(problem, level) for problem, level in scored_samples if min_level <= level <= max_level]
 
-    if not eligible:
-        print('\n未能在难度范围内选出题目，请放宽难度或减少题量。')
+def main() -> None:
+    """命令行入口：采集需求、打印分布并生成题目。"""
+
+    terms, label = select_mode()
+    presenter = WorksheetPresenter(label)  # 所有输出都交给 presenter，保持入口整洁
+    print(f"\n已选择题型：{label}\n")
+    print(f"正在基于 {SAMPLE_SIZE_FOR_DISTRIBUTION} 道随机题估算该题型的难度分布……")
+
+    distribution, scored_samples = snapshot_difficulty_distribution(terms)
+    # scored_samples 后续将作为题库来源，distribution 仅用于展示
+    unique_total = len(scored_samples)
+    print(f'去重后保留 {unique_total} 道独特题目。')
+    presenter.show_distribution(distribution, unique_total)
+
+    request = collect_generation_request()
+    selector = ProblemSelector(scored_samples)
+    problems = selector.select(request)
+
+    if not problems:
         return
 
-    random.shuffle(eligible)
-    minus_pool = [item for item in eligible if item[0].operators[0] == '-']
-    plus_pool = [item for item in eligible if item[0].operators[0] == '+']
-
-    minus_target = round(amount * minus_percentage / 100)
-    plus_target = amount - minus_target
-
-    if len(minus_pool) < minus_target:
-        print(f"\n减法题仅剩 {len(minus_pool)} 道，无法满足 {minus_target} 道的期望。")
-        minus_target = len(minus_pool)
-    if len(plus_pool) < plus_target:
-        print(f"加法题仅剩 {len(plus_pool)} 道，无法满足 {plus_target} 道的期望。")
-        plus_target = len(plus_pool)
-
-    random.shuffle(minus_pool)
-    random.shuffle(plus_pool)
-    selected: list[tuple[Problem, float]] = []
-    selected.extend(minus_pool[:minus_target])
-    selected.extend(plus_pool[:plus_target])
-
-    if len(selected) < amount:
-        remaining = [item for item in eligible if item not in selected]
-        random.shuffle(remaining)
-        selected.extend(remaining[:amount - len(selected)])
-
-    problems = selected[:amount]
-
-    if len(problems) < amount:
+    if len(problems) < request.amount:
         print(f"\n仅选出 {len(problems)} 道题。尝试调低难度或减少题量。")
     else:
-        actual_minus = sum(1 for problem, _ in problems if problem.operators[0] == '-')
-        actual_plus = len(problems) - actual_minus
-        print(f"\n实际加法/减法分布：加法 {actual_plus} 道，减法 {actual_minus} 道。")
+        presenter.report_operator_distribution(problems)
 
     print('\n生成结果：')
-    for problem, level in problems:
-        print(f"{problem.statement()}  (difficulty={level:.2f})")
-
-    if prompt_yes_no('是否生成可打印网页？'):
-        default_name = f"worksheet_{date.today().isoformat()}.html"
-        output_path = ensure_html_suffix(prompt_output_path('输出文件名', default_name))
-        subtitle = f"题量：{len(problems)}  难度：{format_level(min_level)} - {format_level(max_level)}"
-        meta = WorksheetMeta(
-            title=label,
-            subtitle=subtitle,
-            note='姓名：__________    日期：__________'
-        )
-        html_text = render_html([problem for problem, _ in problems], meta)
-        output_path.write_text(html_text, encoding='utf-8')
-        print(f'\n已生成网页：{output_path.resolve()}\n')
+    presenter.print_problem_statements(problems)
+    presenter.maybe_export_html(problems, request)
 
 
 if __name__ == '__main__':
