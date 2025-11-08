@@ -359,7 +359,7 @@ def main() -> None:
     print(f"\n已选择题型：{label}\n")
 
     amount = prompt_int('需要生成多少道题（至少 1 道）', default=100, minimum=1)
-    min_level = prompt_float('最低难度', default=1.0)
+    min_level = prompt_float('最低难度', default=10.0)
     max_level = float('inf')
 
     factory = ProblemFactory(terms=terms, limit=100)
