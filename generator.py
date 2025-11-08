@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import html
 import random
+from collections import Counter
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -19,12 +20,17 @@ from additional_difficulty.differences import difficulty_of_difference
 from additional_difficulty.sum_of_two import difficulty_of_sum_of_two
 
 
+SAMPLE_SIZE_FOR_DISTRIBUTION = 100_000
+SAMPLE_PRECISION = 2
+
+
 @dataclass
 class Problem:
     numbers: list[int]
     operators: list[str]
 
     def statement(self) -> str:
+        """返回题目的字符串表示，供终端与网页展示。"""
         parts = [str(self.numbers[0])]
         for operator, number in zip(self.operators, self.numbers[1:]):
             parts.append(f" {operator} {number}")
@@ -32,6 +38,7 @@ class Problem:
         return "".join(parts)
 
     def answer(self) -> int:
+        """按照运算符顺序计算题目的答案。"""
         total = self.numbers[0]
         for operator, number in zip(self.operators, self.numbers[1:]):
             if operator == '+':
@@ -39,6 +46,24 @@ class Problem:
             else:
                 total -= number
         return total
+
+
+def problem_signature(problem: Problem) -> tuple[tuple[int, ...], tuple[str, ...]]:
+    """用数列+运算符列描述一道题目，便于去重。"""
+    return tuple(problem.numbers), tuple(problem.operators)
+
+
+def deduplicate_problems(problems: Sequence[Problem]) -> list[Problem]:
+    """移除重复题目，仅保留首次出现的组合。"""
+    seen: set[tuple[tuple[int, ...], tuple[str, ...]]] = set()
+    unique: list[Problem] = []
+    for problem in problems:
+        signature = problem_signature(problem)
+        if signature in seen:
+            continue
+        seen.add(signature)
+        unique.append(problem)
+    return unique
 
 
 @dataclass
@@ -50,10 +75,12 @@ class WorksheetMeta:
 
 class ProblemFactory:
     def __init__(self, terms: int, limit: int):
+        """配置需要的算式项数与结果上限。"""
         self.terms = terms
         self.limit = limit
 
     def create(self) -> Problem | None:
+        """随机生成一道符合限制的题目，若失败返回 None。"""
         current = random.randint(1, self.limit)
         numbers = [current]
         operators: list[str] = []
@@ -91,6 +118,7 @@ class ProblemFactory:
 
 
 def difficulty(problem: Problem) -> float:
+    """根据 additional_difficulty 模型计算题目的浮点难度。"""
     total = 0.0
     running = problem.numbers[0]
 
@@ -106,12 +134,14 @@ def difficulty(problem: Problem) -> float:
 
 
 def format_level(value: float) -> str:
+    """把浮点难度格式化为人类可读的字符串。"""
     if value == float('inf'):
         return '∞'
     return f"{value:.2f}".rstrip('0').rstrip('.')
 
 
 def generate(factory: ProblemFactory, amount: int, min_level: float, max_level: float) -> list[tuple[Problem, float]]:
+    """使用题目工厂生成满足数量与难度范围的题目集合。"""
     collected: list[tuple[Problem, float]] = []
     attempts = 0
     candidate_target = max(amount * 2, amount)
@@ -200,8 +230,35 @@ def generate(factory: ProblemFactory, amount: int, min_level: float, max_level: 
     return collected
 
 
+def snapshot_difficulty_distribution(
+    terms: int,
+    sample_size: int = SAMPLE_SIZE_FOR_DISTRIBUTION,
+    precision: int = SAMPLE_PRECISION,
+) -> tuple[list[tuple[float, int]], list[tuple[Problem, float]]]:
+    """随机采样题目以估算指定题型的难度分布，并返回去重后的题库。"""
+    factory = ProblemFactory(terms=terms, limit=100)
+    samples: list[Problem] = []
+    while len(samples) < sample_size:
+        problem = factory.create()
+        if problem is None or not problem.operators:
+            continue
+        samples.append(problem)
+
+    unique = deduplicate_problems(samples)
+
+    counts: Counter[float] = Counter()
+    scored: list[tuple[Problem, float]] = []
+    for problem in unique:
+        level = difficulty(problem)
+        scored.append((problem, level))
+        level_bucket = round(level, precision)
+        counts[level_bucket] += 1
+
+    return sorted(counts.items()), scored
+
 
 def render_html(problems: Sequence[Problem], meta: WorksheetMeta) -> str:
+    """将题目渲染成 A4 打印友好的 HTML。"""
     rows: list[str] = []
     for _, problem in enumerate(problems, start=1):
         statement = problem.statement()
@@ -280,6 +337,7 @@ def render_html(problems: Sequence[Problem], meta: WorksheetMeta) -> str:
 
 
 def prompt_int(message: str, default: int, minimum: int) -> int:
+    """交互式获取整数输入，带默认值与最小值校验。"""
     while True:
         raw = input(f"{message} [{default}]: ").strip()
         if not raw:
@@ -298,6 +356,7 @@ def prompt_int(message: str, default: int, minimum: int) -> int:
 
 
 def prompt_float(message: str, default: float) -> float:
+    """交互式获取浮点输入，无法解析时提醒重输。"""
     while True:
         raw = input(f"{message} [{default}]: ").strip()
         if not raw:
@@ -309,6 +368,7 @@ def prompt_float(message: str, default: float) -> float:
 
 
 def prompt_yes_no(message: str) -> bool:
+    """询问用户布尔选择，接受中英文 y/n。"""
     while True:
         raw = input(f"{message} (y/n)：").strip().lower()
         if raw in {'y', 'yes', '是'}:
@@ -320,6 +380,7 @@ def prompt_yes_no(message: str) -> bool:
 
 
 def prompt_output_path(message: str, fallback: str) -> Path:
+    """获取输出文件路径，禁止用户输入目录。"""
     while True:
         raw = input(f"{message} [{fallback}]: ").strip()
         target = fallback if not raw else raw
@@ -332,48 +393,91 @@ def prompt_output_path(message: str, fallback: str) -> Path:
 
 
 def ensure_html_suffix(path: Path) -> Path:
+    """确保返回的路径后缀为 .html/.htm。"""
     if path.suffix.lower() not in {'.html', '.htm'}:
         return path.with_suffix('.html')
     return path
 
 
-def select_mode() -> tuple[int, str]:
-    choices = {
-        '1': (2, '100 以内两数加减'),
-        '2': (3, '100 以内三数加减'),
-        '3': (4, '100 以内四数加减'),
-    }
-    prompt = "\n请选择题型:\n" + "\n".join(f"  {key}. {label}" for key, (_, label) in choices.items())
-
+def prompt_percentage(message: str, default: int) -> int:
+    """获取 0-100 之间的整数百分比。"""
     while True:
-        print(prompt)
-        pick = input('输入对应数字: ').strip()
-        if pick in choices:
-            terms, label = choices[pick]
-            return terms, label
-        print('无效选项，请重新输入。')
+        raw = input(f"{message} [{default}%]: ").strip('% ').strip()
+        if not raw:
+            return default
+        if not raw.isdigit():
+            print('请输入 0-100 的整数。')
+            continue
+        value = int(raw)
+        if not 0 <= value <= 100:
+            print('请输入 0-100 的整数。')
+            continue
+        return value
+
+
+def select_mode() -> tuple[int, str]:
+    """当前版本固定提供 100 以内两数加减。"""
+    print('\n当前仅支持题型：100 以内两数加减。')
+    return 2, '100 以内两数加减'
 
 
 def main() -> None:
+    """命令行入口：采集需求、打印分布并生成题目。"""
     terms, label = select_mode()
     print(f"\n已选择题型：{label}\n")
+    print(f"正在基于 {SAMPLE_SIZE_FOR_DISTRIBUTION} 道随机题估算该题型的难度分布……")
+    distribution, scored_samples = snapshot_difficulty_distribution(terms)
+    unique_total = len(scored_samples)
+    print(f'去重后保留 {unique_total} 道独特题目。')
+    print('难度分布：')
+    for level, count in distribution:
+        ratio = count / unique_total * 100 if unique_total else 0
+        print(f"  难度 {level:.{SAMPLE_PRECISION}f}: {count:>7}  ({ratio:5.2f}%)")
 
-    amount = prompt_int('需要生成多少道题（至少 1 道）', default=100, minimum=1)
+    amount = prompt_int('\n需要生成多少道题（至少 1 道）', default=100, minimum=1)
+    minus_percentage = prompt_percentage('减法题占比（剩余将自动分配给加法）', default=50)
     min_level = prompt_float('最低难度', default=10.0)
     max_level = float('inf')
 
-    factory = ProblemFactory(terms=terms, limit=100)
-    problems = generate(factory, amount * 2, min_level, max_level)
+    eligible = [(problem, level) for problem, level in scored_samples if min_level <= level <= max_level]
 
-    if not problems:
-        print('\n未能在难度范围内生成题目，请放宽难度或减少题量。')
+    if not eligible:
+        print('\n未能在难度范围内选出题目，请放宽难度或减少题量。')
         return
 
-    random.shuffle(problems)
-    problems = problems[:amount]
+    random.shuffle(eligible)
+    minus_pool = [item for item in eligible if item[0].operators[0] == '-']
+    plus_pool = [item for item in eligible if item[0].operators[0] == '+']
+
+    minus_target = round(amount * minus_percentage / 100)
+    plus_target = amount - minus_target
+
+    if len(minus_pool) < minus_target:
+        print(f"\n减法题仅剩 {len(minus_pool)} 道，无法满足 {minus_target} 道的期望。")
+        minus_target = len(minus_pool)
+    if len(plus_pool) < plus_target:
+        print(f"加法题仅剩 {len(plus_pool)} 道，无法满足 {plus_target} 道的期望。")
+        plus_target = len(plus_pool)
+
+    random.shuffle(minus_pool)
+    random.shuffle(plus_pool)
+    selected: list[tuple[Problem, float]] = []
+    selected.extend(minus_pool[:minus_target])
+    selected.extend(plus_pool[:plus_target])
+
+    if len(selected) < amount:
+        remaining = [item for item in eligible if item not in selected]
+        random.shuffle(remaining)
+        selected.extend(remaining[:amount - len(selected)])
+
+    problems = selected[:amount]
 
     if len(problems) < amount:
-        print(f"\n仅生成 {len(problems)} 道题。尝试调低难度或减少题量。")
+        print(f"\n仅选出 {len(problems)} 道题。尝试调低难度或减少题量。")
+    else:
+        actual_minus = sum(1 for problem, _ in problems if problem.operators[0] == '-')
+        actual_plus = len(problems) - actual_minus
+        print(f"\n实际加法/减法分布：加法 {actual_plus} 道，减法 {actual_minus} 道。")
 
     print('\n生成结果：')
     for problem, level in problems:
