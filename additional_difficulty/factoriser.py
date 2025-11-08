@@ -7,6 +7,7 @@ from typing import Iterator, Iterable
 
 
 class ErathosthenesFactoriser:
+    """利用埃拉托斯特尼筛缓存素数并执行分解。"""
 
     # not primes, sieved out
     # composites = set()

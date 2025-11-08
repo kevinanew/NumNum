@@ -26,6 +26,7 @@ SAMPLE_PRECISION = 2
 
 @dataclass
 class Problem:
+    """表示一道由多项整数组成的加减算式。"""
     numbers: list[int]
     operators: list[str]
 
@@ -68,12 +69,14 @@ def deduplicate_problems(problems: Sequence[Problem]) -> list[Problem]:
 
 @dataclass
 class WorksheetMeta:
+    """描述导出题单时的标题、副标题与备注。"""
     title: str
     subtitle: str
     note: str
 
 
 class ProblemFactory:
+    """根据项数与结果上限随机构造题目。"""
     def __init__(self, terms: int, limit: int):
         """配置需要的算式项数与结果上限。"""
         self.terms = terms

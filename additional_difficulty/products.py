@@ -7,9 +7,8 @@ from typing import Iterator
 from additional_difficulty.factoriser import ErathosthenesFactoriser
 from additional_difficulty.sum_of_two import difficulty_of_sum
 
-
-
 class ProductsGenerator:
+    """生成指定整数的乘数组合，供难度函数使用。"""
     def __init__(self, factoriser : ErathosthenesFactoriser | None = None):
         self.factoriser = factoriser or ErathosthenesFactoriser()
 
