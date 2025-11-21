@@ -196,7 +196,9 @@ class WorksheetPresenter:
             subtitle=subtitle,
             note='姓名：__________    日期：__________',
         )
-        html_text = render_html([problem for problem, _ in problems], meta)
+        shuffled = list(problems)
+        random.shuffle(shuffled)
+        html_text = render_html([problem for problem, _ in shuffled], meta)
         output_path.write_text(html_text, encoding='utf-8')
         print(f'\n已生成网页：{output_path.resolve()}\n')
 
