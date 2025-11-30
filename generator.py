@@ -16,6 +16,8 @@ from datetime import date
 from pathlib import Path
 from typing import Sequence
 
+from weasyprint import HTML as WeasyHTML
+
 from additional_difficulty.differences import difficulty_of_difference
 from additional_difficulty.sum_of_two import difficulty_of_sum_of_two
 
@@ -80,6 +82,14 @@ class WorksheetMeta:
     title: str
     subtitle: str
     note: str
+
+
+@dataclass
+class ExportPlan:
+    """描述批量导出的目标文件及份数。"""
+
+    copies: int
+    targets: list[Path]
 
 
 @dataclass
@@ -175,18 +185,18 @@ class WorksheetPresenter:
         for problem, level in problems:
             print(f"{problem.statement()}  (difficulty={level:.2f})")
 
-    def maybe_export_html(
+    def prepare_export_plan(self) -> ExportPlan:
+        copies = prompt_int('需要生成多少份网页', default=1, minimum=1)
+        targets = build_export_targets(copies)
+        return ExportPlan(copies=copies, targets=targets)
+
+    def export_html(
         self,
         problems: Sequence[tuple[Problem, float]],
         request: GenerationRequest,
+        plan: ExportPlan,
     ) -> None:
-        if not problems:
-            return
-        if not prompt_yes_no('是否生成可打印网页？'):
-            return
-
-        default_name = f"worksheet_{date.today().isoformat()}.html"
-        output_path = ensure_html_suffix(prompt_output_path('输出文件名', default_name))
+        html_exports: list[tuple[Path, str]] = []
         subtitle = (
             f"题量：{len(problems)}  难度：{format_level(request.min_level)} - "
             f"{format_level(request.max_level)}"
@@ -196,11 +206,80 @@ class WorksheetPresenter:
             subtitle=subtitle,
             note='姓名：__________    日期：__________',
         )
-        shuffled = list(problems)
-        random.shuffle(shuffled)
-        html_text = render_html([problem for problem, _ in shuffled], meta)
-        output_path.write_text(html_text, encoding='utf-8')
-        print(f'\n已生成网页：{output_path.resolve()}\n')
+        for index, path in enumerate(plan.targets, start=1):
+            shuffled = list(problems)
+            random.shuffle(shuffled)
+            html_text = render_html([problem for problem, _ in shuffled], meta)
+            path.write_text(html_text, encoding='utf-8')
+            html_exports.append((path, html_text))
+            suffix = f"（第 {index} 份）" if plan.copies > 1 else ''
+            print(f"\n已生成网页{suffix}：{path.resolve()}")
+        self.export_pdf(html_exports, plan)
+        print()
+
+    def export_pdf(
+        self,
+        html_exports: Sequence[tuple[Path, str]],
+        plan: ExportPlan,
+    ) -> None:
+        if not html_exports:
+            return
+
+        pdf_path = build_pdf_target()
+        documents = []
+        for path, html_text in html_exports:
+            document = WeasyHTML(string=html_text, base_url=str(path.parent.resolve())).render()
+            documents.append(document)
+
+        pages = [page for document in documents for page in document.pages]
+        if not pages:
+            return
+
+        documents[0].copy(pages).write_pdf(str(pdf_path))
+        print(f"\n已合并生成 PDF：{pdf_path.resolve()}")
+
+
+def build_export_targets(copies: int) -> list[Path]:
+    """根据份数自动生成唯一的输出文件列表。"""
+
+    default_stem = default_output_stem()
+    targets: list[Path] = []
+    reserved: set[Path] = set()
+
+    for index in range(1, copies + 1):
+        name = f"{default_stem}.html" if copies == 1 else f"{default_stem}_{index}.html"
+        base = Path(name)
+        candidate = ensure_unique_output_path(base, reserved)
+        targets.append(candidate)
+        reserved.add(candidate.resolve())
+
+    return targets
+
+
+def build_pdf_target() -> Path:
+    """生成用于合并导出的 PDF 路径。"""
+
+    base = Path(f"{default_output_stem()}.pdf")
+    return ensure_unique_output_path(base, set())
+
+
+def ensure_unique_output_path(base: Path, reserved: set[Path]) -> Path:
+    """若默认文件已存在，则自动在文件名后追加序号。"""
+
+    candidate = base
+    suffix_index = 1
+    while True:
+        resolved = candidate.resolve()
+        if resolved not in reserved and not candidate.exists():
+            return candidate
+        candidate = candidate.with_name(f"{base.stem}_{suffix_index}{base.suffix}")
+        suffix_index += 1
+
+
+def default_output_stem() -> str:
+    """返回基于当天日期的默认文件名前缀。"""
+
+    return f"worksheet_{date.today().isoformat()}"
 
 
 class ProblemFactory:
@@ -509,39 +588,6 @@ def prompt_float(message: str, default: float) -> float:
             print('请输入数字。')
 
 
-def prompt_yes_no(message: str) -> bool:
-    """询问用户布尔选择，接受中英文 y/n。"""
-
-    while True:
-        raw = input(f"{message} (y/n)：").strip().lower()
-        if raw in {'y', 'yes', '是'}:
-            return True
-        if raw in {'n', 'no', '否', ''}:
-            return False
-        print('请输入 y 或 n。')
-
-
-def prompt_output_path(message: str, fallback: str) -> Path:
-    """获取输出文件路径，禁止用户输入目录。"""
-
-    while True:
-        raw = input(f"{message} [{fallback}]: ").strip()
-        target = fallback if not raw else raw
-        path = Path(target).expanduser()
-        if path.is_dir():
-            print('请输入文件名而不是目录。')
-            continue
-        return path
-
-
-def ensure_html_suffix(path: Path) -> Path:
-    """确保返回的路径后缀为 .html/.htm。"""
-
-    if path.suffix.lower() not in {'.html', '.htm'}:
-        return path.with_suffix('.html')
-    return path
-
-
 def prompt_percentage(message: str, default: int) -> int:
     """获取 0-100 之间的整数百分比。"""
 
@@ -601,6 +647,8 @@ def main() -> None:
     if not problems:
         return
 
+    export_plan = presenter.prepare_export_plan()
+
     if len(problems) < request.amount:
         print(f"\n仅选出 {len(problems)} 道题。尝试调低难度或减少题量。")
     else:
@@ -608,7 +656,7 @@ def main() -> None:
 
     print('\n生成结果：')
     presenter.print_problem_statements(problems)
-    presenter.maybe_export_html(problems, request)
+    presenter.export_html(problems, request, export_plan)
 
 
 if __name__ == '__main__':
