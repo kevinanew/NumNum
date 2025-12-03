@@ -180,7 +180,10 @@ class WorksheetPresenter:
     def show_distribution(self, distribution: Sequence[tuple[float, int]], total: int) -> None:
         print('难度分布：')
         for level, count in distribution:
-            ratio = count / total * 100 if total else 0
+            if total:
+                ratio = count / total * 100
+            else:
+                ratio = 0
             print(f"  难度 {level:.{SAMPLE_PRECISION}f}: {count:>7}  ({ratio:5.2f}%)")
 
     @staticmethod
@@ -205,31 +208,32 @@ class WorksheetPresenter:
         request: GenerationRequest,
         plan: ExportPlan,
     ) -> None:
+        html_texts = self._render_batches(batches, request)
         html_exports: list[tuple[Path, str]] = []
-        for index, (path, problems) in enumerate(zip(plan.targets, batches), start=1):
-            subtitle = (
-                f"题量：{len(problems)}  难度：{format_level(request.min_level)} - "
-                f"{format_level(request.max_level)}"
-            )
-            meta = WorksheetMeta(
-                title=self.label,
-                subtitle=subtitle,
-                note='姓名：__________    日期：__________',
-            )
-
-            shuffled = list(problems)
-            random.shuffle(shuffled)
-            html_text = render_html([problem for problem, _ in shuffled], meta)
+        for index, (path, html_text) in enumerate(zip(plan.targets, html_texts), start=1):
             path.write_text(html_text, encoding='utf-8')
             html_exports.append((path, html_text))
-            suffix = f"（第 {index} 份）" if plan.copies > 1 else ''
+            if plan.copies > 1:
+                suffix = f"（第 {index} 份）"
+            else:
+                suffix = ''
             print(f"\n已生成网页{suffix}：{path.resolve()}")
         self.export_pdf(html_exports, plan)
         print()
 
+    def export_pdf_only(
+        self,
+        batches: Sequence[Sequence[tuple[Problem, float]]],
+        request: GenerationRequest,
+        plan: ExportPlan,
+    ) -> None:
+        html_texts = self._render_batches(batches, request)
+        print('\n题目不足，跳过网页导出，仅生成 PDF。')
+        self.export_pdf([(None, html_text) for html_text in html_texts], plan)
+
     def export_pdf(
         self,
-        html_exports: Sequence[tuple[Path, str]],
+        html_exports: Sequence[tuple[Path | None, str]],
         plan: ExportPlan,
     ) -> None:
         if not html_exports:
@@ -238,7 +242,11 @@ class WorksheetPresenter:
         pdf_path = build_pdf_target()
         documents = []
         for path, html_text in html_exports:
-            document = WeasyHTML(string=html_text, base_url=str(path.parent.resolve())).render()
+            if path:
+                base_url = str(path.parent.resolve())
+            else:
+                base_url = None
+            document = WeasyHTML(string=html_text, base_url=base_url).render()
             documents.append(document)
 
         pages = [page for document in documents for page in document.pages]
@@ -257,7 +265,10 @@ def build_export_targets(copies: int) -> list[Path]:
     reserved: set[Path] = set()
 
     for index in range(1, copies + 1):
-        name = f"{default_stem}.html" if copies == 1 else f"{default_stem}_{index}.html"
+        if copies == 1:
+            name = f"{default_stem}.html"
+        else:
+            name = f"{default_stem}_{index}.html"
         base = Path(name)
         candidate = ensure_unique_output_path(base, reserved)
         targets.append(candidate)
@@ -661,21 +672,25 @@ def main() -> None:
     selector = ProblemSelector(scored_samples)
     print('构建题目筛选器，准备根据难度和运算符分布挑选题目。')
 
+    generation_incomplete = False
     problems_by_copy: list[list[tuple[Problem, float]]] = []
     for copy_index in range(1, export_plan.copies + 1):
         print(f"\n正在为第 {copy_index} 份生成题目……")
         current = selector.select(request)
         if not current:
             print('未能继续生成题目，提前结束。')
+            generation_incomplete = True
             break
         selector.consume(current)
         problems_by_copy.append(list(current))
 
         if len(current) < request.amount:
+            generation_incomplete = True
             print(
                 f"仅为第 {copy_index} 份选出 {len(current)} 道题。"
                 '尝试调低难度或减少题量。'
             )
+            break
         else:
             presenter.report_operator_distribution(current)
 
@@ -683,6 +698,7 @@ def main() -> None:
         return
 
     if len(problems_by_copy) < export_plan.copies:
+        generation_incomplete = True
         print(
             f"\n题库不足，仅生成 {len(problems_by_copy)} 份。"
             '未生成的份数请调整条件后重试。'
@@ -697,8 +713,32 @@ def main() -> None:
         print(f"\n第 {index} 份题目：")
         presenter.print_problem_statements(batch)
 
-    presenter.export_html(problems_by_copy, request, export_plan)
+    if generation_incomplete:
+        presenter.export_pdf_only(problems_by_copy, request, export_plan)
+    else:
+        presenter.export_html(problems_by_copy, request, export_plan)
 
 
 if __name__ == '__main__':
     main()
+    def _render_batches(
+        self,
+        batches: Sequence[Sequence[tuple[Problem, float]]],
+        request: GenerationRequest,
+    ) -> list[str]:
+        html_texts: list[str] = []
+        for problems in batches:
+            subtitle = (
+                f"题量：{len(problems)}  难度：{format_level(request.min_level)} - "
+                f"{format_level(request.max_level)}"
+            )
+            meta = WorksheetMeta(
+                title=self.label,
+                subtitle=subtitle,
+                note='姓名：__________    日期：__________',
+            )
+            shuffled = list(problems)
+            random.shuffle(shuffled)
+            html_text = render_html([problem for problem, _ in shuffled], meta)
+            html_texts.append(html_text)
+        return html_texts
