@@ -116,6 +116,15 @@ class ProblemSelector:
     def __init__(self, scored_samples: Sequence[tuple[Problem, float]]):
         self.scored_samples = list(scored_samples)
 
+    def consume(self, selected: Sequence[tuple[Problem, float]]) -> None:
+        """从题库中移除已分配题目，避免重复使用。"""
+
+        for item in selected:
+            try:
+                self.scored_samples.remove(item)
+            except ValueError:
+                continue
+
     def select(self, request: GenerationRequest) -> list[tuple[Problem, float]]:
         eligible = self._filter_by_difficulty(request)
         if not eligible:
@@ -192,21 +201,22 @@ class WorksheetPresenter:
 
     def export_html(
         self,
-        problems: Sequence[tuple[Problem, float]],
+        batches: Sequence[Sequence[tuple[Problem, float]]],
         request: GenerationRequest,
         plan: ExportPlan,
     ) -> None:
         html_exports: list[tuple[Path, str]] = []
-        subtitle = (
-            f"题量：{len(problems)}  难度：{format_level(request.min_level)} - "
-            f"{format_level(request.max_level)}"
-        )
-        meta = WorksheetMeta(
-            title=self.label,
-            subtitle=subtitle,
-            note='姓名：__________    日期：__________',
-        )
-        for index, path in enumerate(plan.targets, start=1):
+        for index, (path, problems) in enumerate(zip(plan.targets, batches), start=1):
+            subtitle = (
+                f"题量：{len(problems)}  难度：{format_level(request.min_level)} - "
+                f"{format_level(request.max_level)}"
+            )
+            meta = WorksheetMeta(
+                title=self.label,
+                subtitle=subtitle,
+                note='姓名：__________    日期：__________',
+            )
+
             shuffled = list(problems)
             random.shuffle(shuffled)
             html_text = render_html([problem for problem, _ in shuffled], meta)
@@ -640,23 +650,54 @@ def main() -> None:
     print(f'去重后保留 {unique_total} 道独特题目。')
     presenter.show_distribution(distribution, unique_total)
 
-    request = collect_generation_request()
-    selector = ProblemSelector(scored_samples)
-    problems = selector.select(request)
-
-    if not problems:
-        return
-
     export_plan = presenter.prepare_export_plan()
 
-    if len(problems) < request.amount:
-        print(f"\n仅选出 {len(problems)} 道题。尝试调低难度或减少题量。")
-    else:
-        presenter.report_operator_distribution(problems)
+    request = collect_generation_request()
+    print(
+        f"\n已收集需求：题量 {request.amount}，减法占比 {request.minus_ratio}%，"
+        f"最低难度 {request.min_level}，最高难度 {request.max_level}."
+    )
+
+    selector = ProblemSelector(scored_samples)
+    print('构建题目筛选器，准备根据难度和运算符分布挑选题目。')
+
+    problems_by_copy: list[list[tuple[Problem, float]]] = []
+    for copy_index in range(1, export_plan.copies + 1):
+        print(f"\n正在为第 {copy_index} 份生成题目……")
+        current = selector.select(request)
+        if not current:
+            print('未能继续生成题目，提前结束。')
+            break
+        selector.consume(current)
+        problems_by_copy.append(list(current))
+
+        if len(current) < request.amount:
+            print(
+                f"仅为第 {copy_index} 份选出 {len(current)} 道题。"
+                '尝试调低难度或减少题量。'
+            )
+        else:
+            presenter.report_operator_distribution(current)
+
+    if not problems_by_copy:
+        return
+
+    if len(problems_by_copy) < export_plan.copies:
+        print(
+            f"\n题库不足，仅生成 {len(problems_by_copy)} 份。"
+            '未生成的份数请调整条件后重试。'
+        )
+        export_plan = ExportPlan(
+            copies=len(problems_by_copy),
+            targets=export_plan.targets[: len(problems_by_copy)],
+        )
 
     print('\n生成结果：')
-    presenter.print_problem_statements(problems)
-    presenter.export_html(problems, request, export_plan)
+    for index, batch in enumerate(problems_by_copy, start=1):
+        print(f"\n第 {index} 份题目：")
+        presenter.print_problem_statements(batch)
+
+    presenter.export_html(problems_by_copy, request, export_plan)
 
 
 if __name__ == '__main__':
